@@ -1,0 +1,21 @@
+# Бинарные сборки
+FlexRouter/bin/
+FlexRouter/obj/
+FlexRouter/TestResults/
+TestResults/
+*.user
+*.suo
+.vs/
+
+# Временные файлы сборки WPF
+FlexRouter/*_wpftmp.csproj
+
+# Аддон симулятора (несколько сотен МБ)
+PT Tu-154M v2.04 FULL/
+
+# Отладочные логи
+arcc_connect.log
+*.log
+
+# FlexRouter - отдельное репо github.com/evoeram/FlexRouter
+FlexRouter/
