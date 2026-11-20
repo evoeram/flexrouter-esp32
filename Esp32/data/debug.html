@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FlexRouter ESP32 — дебаг</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>FlexRouter ESP32</h1>
+  <nav>
+    <a href="/">Статус</a>
+    <a href="/config">Конфигурация</a>
+    <a href="/debug" class="active">Дебаг</a>
+    <a href="/admin">Админ</a>
+  </nav>
+</header>
+<main>
+  <div class="card" id="status">загрузка…</div>
+
+  <div class="card">
+    <h2>Лампы (клик = включить/выключить принудительно)</h2>
+    <div class="row" style="margin-bottom:8px">
+      <button id="resetForce">Сбросить форс</button>
+      <span class="label" style="margin:0">«форс» — лампа включена симуляцией; роутер может её перекрыть следующим обновлением</span>
+    </div>
+    <div id="lamps" class="tilegrid"></div>
+    <p class="label">Индикатор: <span id="indicator" class="mono" style="font-size:16px"></span></p>
+  </div>
+
+  <div class="card">
+    <h2>Входы</h2>
+    <p class="label">Кнопки</p>
+    <div id="buttons" class="tilegrid"></div>
+    <p class="label">Бинарный ввод (28 линий)</p>
+    <div id="binary" class="tilegrid"></div>
+    <p class="label">Энкодеры</p>
+    <div id="encoders">—</div>
+    <p class="label">Оси (0..1023, ADC raw)</p>
+    <div id="axes">—</div>
+  </div>
+
+  <div class="card">
+    <h2>Лента событий ввода</h2>
+    <div class="log" id="iofeed" style="max-height:220px"></div>
+  </div>
+
+  <div class="card">
+    <h2>Монитор ARCC-пакетов (live)</h2>
+    <div class="row">
+      <label><input type="checkbox" id="showTx" checked> TX (плата → роутер)</label>
+      <label><input type="checkbox" id="showRx" checked> RX (роутер → плата)</label>
+      <button id="clearPkts">Очистить</button>
+      <span id="wsState" class="badge">ws…</span>
+    </div>
+    <div class="log" id="pkts" style="max-height:380px"></div>
+  </div>
+
+  <div class="card">
+    <h2>Симуляция событий (плата → роутер)</h2>
+    <div class="row">
+      <input id="sim_ctl" type="number" value="1" min="1" style="width:80px" title="ControlId">
+      <button onclick="sim('button',true)">Кнопка нажать</button>
+      <button onclick="sim('button',false)">Кнопка отпустить</button>
+      <button onclick="sim('encoder',true)">Энкодер +</button>
+      <button onclick="sim('encoder',false)">Энкодер −</button>
+      <button onclick="simAxis()">Ось = значение</button>
+      <input id="sim_axis" type="number" value="512" min="0" max="1023" style="width:90px">
+      <input id="sim_text" placeholder="индикатор, напр. 12.5" style="width:140px">
+      <button onclick="simInd()">На индикатор</button>
+      <button onclick="sim('lamp',true)">Лампа вкл</button>
+      <button onclick="sim('lamp',false)">Лампа выкл</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Журнал</h2>
+    <div class="log" id="log"></div>
+  </div>
+</main>
+<div id="toast"></div>
+<script src="app.js"></script>
+<script>
+const renderStatus = bindStatus('status');
+const pktsEl = document.getElementById('pkts'), logEl = document.getElementById('log');
+
+// ------------------- I/O панель (этап 3.2) -------------------
+
+let prevIo = null;
+const forced = {};          // ctl -> true, лампа включена симуляцией
+const encCounters = {};     // ctl -> {up, down, lastCw}
+const encOrder = [];
+
+function renderIo(io) {
+  // --- лампы: плитки, клик = форс ---
+  const lampsEl = document.getElementById('lamps');
+  const lampKeys = Object.keys(io.lamps || {}).sort((a, b) => a - b);
+  if (lampKeys.join() !== lampsEl.dataset.keys) {
+    lampsEl.dataset.keys = lampKeys.join();
+    lampsEl.innerHTML = lampKeys.map(k =>
+      '<div class="tile lamp" data-ctl="' + k + '" title="клик — переключить">Лампа ' + k +
+      '<span class="tilestate"></span><span class="badge force" style="display:none">форс</span></div>').join('');
+    lampsEl.querySelectorAll('.tile').forEach(t => t.onclick = () => {
+      const ctl = t.dataset.ctl, on = !(io.lamps[ctl]);
+      postJSON('/api/sim', { cmd: 'lamp', ctl: +ctl, on });
+      if (on) { forced[ctl] = true; t.querySelector('.force').style.display = ''; }
+    });
+  }
+  lampKeys.forEach(k => {
+    const t = lampsEl.querySelector('[data-ctl="' + k + '"]');
+    const on = io.lamps[k];
+    t.classList.toggle('on', !!on);
+    t.querySelector('.tilestate').textContent = on ? '● горит' : '○ не горит';
+    if (forced[k] && on) t.querySelector('.force').style.display = '';
+  });
+  document.getElementById('indicator').textContent = '"' + (io.indicator || '') + '"';
+
+  // --- кнопки: сетка + подсветка изменения ---
+  const btnsEl = document.getElementById('buttons');
+  const btnKeys = Object.keys(io.buttons || {}).sort((a, b) => a - b);
+  if (btnKeys.join() !== btnsEl.dataset.keys) {
+    btnsEl.dataset.keys = btnKeys.join();
+    btnsEl.innerHTML = btnKeys.map(k =>
+      '<div class="tile btn" data-ctl="' + k + '">Кн ' + k + '<span class="tilestate"></span></div>').join('');
+  }
+  btnKeys.forEach(k => {
+    const t = btnsEl.querySelector('[data-ctl="' + k + '"]');
+    const on = io.buttons[k];
+    t.classList.toggle('on', !!on);
+    t.querySelector('.tilestate').textContent = on ? '● нажата' : '○';
+  });
+
+  // --- бинарный ввод: 28 линий ---
+  const binEl = document.getElementById('binary');
+  const mask = (io.binaryMask >>> 0);
+  if (!binEl.dataset.built) {
+    let h = '';
+    for (let i = 1; i <= 28; i++)
+      h += '<div class="tile bit" data-bit="' + i + '">' + i + '<span class="tilestate"></span></div>';
+    binEl.innerHTML = h;
+    binEl.dataset.built = '1';
+  }
+  binEl.querySelectorAll('.bit').forEach(t => {
+    const bit = +t.dataset.bit;
+    const on = !!((mask >> (bit - 1)) & 1);
+    t.classList.toggle('on', on);
+    t.querySelector('.tilestate').textContent = on ? '●' : '○';
+  });
+
+  // --- оси: полоски + raw ---
+  const axesEl = document.getElementById('axes');
+  const axKeys = Object.keys(io.axes || {}).sort((a, b) => a - b);
+  if (axKeys.join() !== axesEl.dataset.keys) {
+    axesEl.dataset.keys = axKeys.join();
+    axesEl.innerHTML = axKeys.map(k =>
+      '<div class="axisrow" data-ctl="' + k + '"><span class="mono">ось ' + k + '</span>' +
+      '<div class="axisbar"><div class="axisfill"></div></div><span class="mono axisval"></span></div>').join('');
+  }
+  axKeys.forEach(k => {
+    const row = axesEl.querySelector('[data-ctl="' + k + '"]');
+    const v = io.axes[k], raw = io.axesRaw ? io.axesRaw[k] : null;
+    row.querySelector('.axisfill').style.width = Math.round(v / 10.23) + '%';
+    row.querySelector('.axisval').textContent = v + (raw !== null && raw !== undefined ? ' (adc ' + raw + ')' : '');
+  });
+
+  // --- энкодеры ---
+  const encEl = document.getElementById('encoders');
+  encEl.innerHTML = encOrder.length
+    ? encOrder.map(k => '<span class="badge">энк. ' + k + ': <b>+' + encCounters[k].up +
+                        ' / −' + encCounters[k].down + '</b> (посл.: ' + (encCounters[k].lastCw ? 'CW' : 'CCW') + ')</span>').join(' ')
+    : '—';
+
+  prevIo = io;
+}
+
+function flashChange(sel) {
+  document.querySelectorAll(sel).forEach(el => {
+    el.classList.add('flash');
+    setTimeout(() => el.classList.remove('flash'), 400);
+  });
+}
+
+// ------------------- лента событий ввода (этап 3.3) -------------------
+
+const feedEl = document.getElementById('iofeed');
+let prevMask = null, prevButtons = {};
+function feed(msg) {
+  const time = new Date().toISOString().substr(11, 12);
+  const div = document.createElement('div');
+  div.className = 'lvl' + (msg.kind === 'press' ? 1 : 0);
+  div.textContent = '[' + time + '] ' + msg.text;
+  feedEl.appendChild(div);
+  while (feedEl.childNodes.length > 100) feedEl.removeChild(feedEl.firstChild);
+  feedEl.scrollTop = feedEl.scrollHeight;
+}
+
+// ------------------- монитор пакетов -------------------
+
+function appendPkt(p) {
+  if (p.dir === 'tx' && !document.getElementById('showTx').checked) return;
+  if (p.dir === 'rx' && !document.getElementById('showRx').checked) return;
+  const div = document.createElement('div');
+  div.className = 'pkt ' + p.dir;
+  let dec = esc(p.mod);
+  if (p.mod === 'button') dec += ' ctl=' + p.ctl + ' ' + (p.on ? 'НАЖАТА' : 'отпущена');
+  else if (p.mod === 'binary') dec += ' маска=' + p.mask;
+  else if (p.mod === 'encoder') dec += ' ctl=' + p.ctl + (p.cw ? ' +1' : ' -1');
+  else if (p.mod === 'axis') dec += ' [' + p.vals.join(', ') + ']';
+  else if (p.mod === 'lamp') dec += ' лампа ctl=' + p.ctl + ' ' + (p.on ? 'ВКЛ' : 'выкл');
+  else if (p.mod === 'indicator') dec += ' "' + esc(p.text) + '"';
+  div.innerHTML = '<b>' + p.dir.toUpperCase() + '</b> ' + esc(p.hex) + ' <span class="dec">| ' + dec + '</span>';
+  pktsEl.appendChild(div);
+  while (pktsEl.childNodes.length > 400) pktsEl.removeChild(pktsEl.firstChild);
+  pktsEl.scrollTop = pktsEl.scrollHeight;
+}
+
+connectWS(msg => {
+  if (msg.t === 'status') renderStatus(msg);
+  else if (msg.t === 'pkt') {
+    appendPkt(msg);
+    // энкодеры и лента событий - из TX-пакетов платы
+    if (msg.dir === 'tx') {
+      if (msg.mod === 'encoder') {
+        const ctl = msg.ctl;
+        if (!encCounters[ctl]) { encCounters[ctl] = { up: 0, down: 0, lastCw: msg.cw }; encOrder.push(ctl); }
+        msg.cw ? encCounters[ctl].up++ : encCounters[ctl].down--;
+        encCounters[ctl].lastCw = msg.cw;
+        feed({ kind: 'enc', text: 'энкодер ' + ctl + ': ' + (msg.cw ? '+' : '−') + '1' });
+      } else if (msg.mod === 'button') {
+        feed({ kind: msg.on ? 'press' : 'rel', text: 'кнопка ' + msg.ctl + (msg.on ? ' нажата' : ' отпущена') });
+      } else if (msg.mod === 'axis') {
+        // оси шлются пачкой - в ленту не пишем (шумно)
+      }
+    }
+  }
+  else if (msg.t === 'log') appendLog(msg);
+  else if (msg.t === 'io') {
+    // подсветка изменений кнопок/маски
+    if (prevIo) {
+      const changedBtns = Object.keys(msg.buttons || {}).filter(k => prevIo.buttons && prevIo.buttons[k] !== msg.buttons[k]);
+      if (changedBtns.length) {
+        changedBtns.forEach(k => {
+          if (prevIo.buttons[k]) feed({ kind: 'rel', text: 'кнопка ' + k + ' отпущена' });
+          else feed({ kind: 'press', text: 'кнопка ' + k + ' нажата' });
+        });
+        flashChange(changedBtns.map(k => '.tile.btn[data-ctl="' + k + '"]').join(','));
+      }
+      if (prevIo.binaryMask !== msg.binaryMask) {
+        const diff = (prevIo.binaryMask ^ msg.binaryMask) >>> 0;
+        const bits = [];
+        for (let i = 1; i <= 28; i++) if ((diff >> (i - 1)) & 1) bits.push(i);
+        bits.forEach(i => feed({ kind: 'press', text: 'линия ' + i + (msg.binaryMask >> (i - 1) & 1 ? ' замкнута' : ' разомкнута') }));
+        flashChange(bits.map(i => '.tile.bit[data-bit="' + i + '"]').join(','));
+      }
+    }
+    renderIo(msg);
+  }
+}, up => document.getElementById('wsState').textContent = up ? 'ws: online' : 'ws: offline');
+
+// сброс форса: гасим все форсированные лампы
+document.getElementById('resetForce').onclick = () => {
+  const ctls = Object.keys(forced);
+  ctls.forEach(ctl => {
+    postJSON('/api/sim', { cmd: 'lamp', ctl: +ctl, on: false });
+    delete forced[ctl];
+  });
+  document.querySelectorAll('#lamps .force').forEach(b => b.style.display = 'none');
+  toast('Форс сброшен (' + ctls.length + ' ламп)');
+};
+
+function sim(cmd, arg) {
+  postJSON('/api/sim', { cmd, ctl: +document.getElementById('sim_ctl').value, on: arg, pressed: arg, cw: arg });
+}
+function simAxis() {
+  postJSON('/api/sim', { cmd: 'axis', ctl: +document.getElementById('sim_ctl').value, value: +document.getElementById('sim_axis').value });
+}
+function simInd() {
+  postJSON('/api/sim', { cmd: 'indicator', text: document.getElementById('sim_text').value });
+}
+document.getElementById('clearPkts').onclick = () => pktsEl.innerHTML = '';
+
+function appendLog(e) {
+  const div = document.createElement('div');
+  div.className = 'lvl' + e.lvl;
+  div.textContent = '[' + new Date(e.ms).toISOString().substr(11, 8) + '] ' + e.msg;
+  logEl.appendChild(div);
+  while (logEl.childNodes.length > 300) logEl.removeChild(logEl.firstChild);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+</script>
+</body>
+</html>

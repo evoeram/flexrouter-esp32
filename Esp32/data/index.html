@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FlexRouter ESP32 — статус</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>FlexRouter ESP32</h1>
+  <nav>
+    <a href="/" class="active">Статус</a>
+    <a href="/config">Конфигурация</a>
+    <a href="/debug">Дебаг</a>
+    <a href="/admin">Админ</a>
+  </nav>
+</header>
+<main>
+  <div class="card" id="status">загрузка…</div>
+
+  <div class="card">
+    <h2>Журнал событий</h2>
+    <div class="log" id="log"></div>
+  </div>
+</main>
+<div id="toast"></div>
+<script src="app.js"></script>
+<script>
+const renderStatus = bindStatus('status');
+const logEl = document.getElementById('log');
+
+connectWS(msg => {
+  if (msg.t === 'status') renderStatus(msg);
+  else if (msg.t === 'log') appendLog(msg);
+});
+
+function appendLog(e) {
+  const div = document.createElement('div');
+  div.className = 'lvl' + e.lvl;
+  const d = new Date(Date.now() - (performance.now() - e.ms));
+  div.textContent = '[' + new Date(e.ms).toISOString().substr(11, 8) + '] ' + e.msg;
+  logEl.appendChild(div);
+  while (logEl.childNodes.length > 300) logEl.removeChild(logEl.firstChild);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+</script>
+</body>
+</html>

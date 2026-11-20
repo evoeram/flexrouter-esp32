@@ -19,3 +19,11 @@ arcc_connect.log
 
 # FlexRouter - отдельное репо github.com/evoeram/FlexRouter
 FlexRouter/
+
+# PlatformIO (Esp32)
+Esp32/.pio/
+Esp32/.vscode/
+
+# временные артефакты работы
+cfg_backup.json
+

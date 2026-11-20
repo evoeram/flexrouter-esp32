@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FlexRouter ESP32 — админ</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>FlexRouter ESP32</h1>
+  <nav>
+    <a href="/">Статус</a>
+    <a href="/config">Конфигурация</a>
+    <a href="/debug">Дебаг</a>
+    <a href="/admin" class="active">Админ</a>
+  </nav>
+</header>
+<main>
+  <div class="card" id="status">загрузка…</div>
+
+  <div class="card">
+    <h2>OTA-обновление прошивки</h2>
+    <div class="row">
+      <input type="file" id="bin" accept=".bin">
+      <button class="primary" id="upload">Загрузить и прошить</button>
+      <span class="label" id="otaMsg"></span>
+    </div>
+    <p class="label">После загрузки плата перезагружается в новую прошивку (второй OTA-слот).</p>
+  </div>
+
+  <div class="card">
+    <h2>Управление</h2>
+    <div class="row">
+      <button id="reboot">Перезагрузка</button>
+      <button class="danger" id="factory">Заводской сброс (стереть Wi-Fi и конфиг → AP-портал)</button>
+    </div>
+    <p class="label">Заводской сброс также доступен удержанием кнопки BOOT на плате 5 секунд.</p>
+  </div>
+</main>
+<div id="toast"></div>
+<script src="app.js"></script>
+<script>
+const renderStatus = bindStatus('status');
+connectWS(msg => { if (msg.t === 'status') renderStatus(msg); });
+
+document.getElementById('reboot').onclick = async () => {
+  if (!confirm('Перезагрузить плату?')) return;
+  await postJSON('/api/reboot', {});
+  toast('Перезагрузка…');
+};
+
+document.getElementById('factory').onclick = async () => {
+  if (!confirm('Заводской сброс: конфиг и креды Wi-Fi будут стёрты, плата уйдёт в точку доступа FlexRouter-Config. Продолжить?')) return;
+  await postJSON('/api/factory_reset', {});
+  toast('Сброс, плата перезагружается…');
+};
+
+document.getElementById('upload').onclick = async () => {
+  const f = document.getElementById('bin').files[0];
+  if (!f) return toast('Выберите .bin файл');
+  const msg = document.getElementById('otaMsg');
+  msg.textContent = 'Загрузка…';
+  try {
+    const r = await fetch('/update', { method: 'POST', body: f });
+    msg.textContent = r.ok ? 'Готово, плата перезагружается…' : 'Ошибка: ' + await r.text();
+    if (r.ok) toast('Прошито, перезагрузка…');
+  } catch (e) { msg.textContent = 'Ошибка: ' + e.message; }
+};
+</script>
+</body>
+</html>

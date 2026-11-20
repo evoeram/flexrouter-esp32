@@ -1,0 +1,535 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FlexRouter ESP32 — конфигурация</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>FlexRouter ESP32</h1>
+  <nav>
+    <a href="/">Статус</a>
+    <a href="/config" class="active">Конфигурация</a>
+    <a href="/debug">Дебаг</a>
+    <a href="/admin">Админ</a>
+  </nav>
+</header>
+<main>
+  <div class="card" id="status">загрузка…</div>
+
+  <div class="card">
+    <h2>Wi-Fi</h2>
+    <div class="kv">
+      <label>Сети</label>
+      <span class="row">
+        <select id="w_scan" style="min-width:220px"><option value="">— сканировать…</option></select>
+        <button id="w_scanbtn">Сканировать</button>
+      </span>
+      <label>SSID</label><input id="w_ssid">
+      <label>Пароль</label><input id="w_pass" type="password">
+      <label>Статический IP (пусто = DHCP)</label><input id="w_ip" class="mono" placeholder="192.168.1.50">
+      <label>Шлюз</label><input id="w_gw" class="mono">
+      <label>Маска</label><input id="w_mask" class="mono" placeholder="255.255.255.0">
+      <label>DNS</label><input id="w_dns" class="mono">
+    </div>
+    <p class="label">Изменение Wi-Fi применяется без перезагрузки; при неудаче плата вернётся в AP-режим.
+      В AP морда доступна на http://192.168.4.1 (срабатывает и captive-редирект).</p>
+  </div>
+
+  <div class="card">
+    <h2>Устройство</h2>
+    <div class="kv">
+      <label>Имя</label><input id="d_name">
+      <label>Hostname (mDNS: имя.local)</label><input id="d_hostname">
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Модули ARCC и карта пинов</h2>
+    <p class="label">id — ModuleId в профиле FlexRouter. Для каждого controlId выбирается GPIO:
+      список показывает только свободные пины; USB (19/20), flash/PSRAM (26–37), UART0 (43/44)
+      и strap-пины зарезервированы. GPIO48 — бортовой WS2812 (можно назначить лампой).
+      Ось — только ADC-пины (GPIO1..20; с Wi-Fi надёжны GPIO1..10).
+      Live-индикатор справа показывает текущее состояние пина.</p>
+    <div id="modList"></div>
+    <div class="row" style="margin-top:8px">
+      <select id="addType">
+        <option value="">— добавить модуль…</option>
+        <option>Button</option>
+        <option>BinaryInput</option>
+        <option>Encoder</option>
+        <option>Axis</option>
+        <option>LinearOutput</option>
+        <option>Indicator</option>
+      </select>
+      <button id="addMod">Добавить</button>
+    </div>
+    <details style="margin-top:10px">
+      <summary class="label">JSON модулей (для опытных)</summary>
+      <textarea id="modjson" rows="12" class="mono" style="width:100%"></textarea>
+      <div class="row" style="margin-top:6px">
+        <button id="jsonIn">← из редактора</button>
+        <button id="jsonOut">→ применить к редактору</button>
+      </div>
+    </details>
+    <p class="label">Изменение модулей/пинов применяется после перезагрузки платы («Сохранить» сам её запускает).</p>
+  </div>
+
+  <div class="card">
+    <h2>Ввод</h2>
+    <div class="kv">
+      <label>Антидребезг, мс</label><input id="io_debounce" type="number" min="0" max="200">
+      <label>Порог оси (0..1023)</label><input id="io_axis" type="number" min="0" max="64">
+      <label>Щелчок энкодера (квадра-шаги)</label><input id="io_detent" type="number" min="1" max="8">
+      <label>TCP-транспорт ARCC (для ArccNetDevice)</label>
+      <span><input id="t_tcp" type="checkbox"> порт <input id="t_port" type="number" class="mono" style="width:90px"></span>
+    </div>
+  </div>
+
+  <div class="row">
+    <button class="primary" id="save">Сохранить</button>
+    <button id="reload">Перечитать</button>
+    <span id="msg" class="label"></span>
+  </div>
+</main>
+<div id="toast"></div>
+<script src="app.js"></script>
+<script>
+const renderStatus = bindStatus('status');
+let ioState = null;
+connectWS(msg => {
+  if (msg.t === 'status') renderStatus(msg);
+  if (msg.t === 'io') { ioState = msg; updateIoStates(); }
+});
+
+let cfg = null, pinInfo = null, modules = [];
+const TYPES = ['Button','BinaryInput','Encoder','Axis','LinearOutput','Indicator'];
+
+function fill() {
+  document.getElementById('w_ssid').value = cfg.wifi?.ssid || '';
+  document.getElementById('w_pass').value = cfg.wifi?.pass || '';
+  document.getElementById('w_ip').value = cfg.wifi?.ip || '';
+  document.getElementById('w_gw').value = cfg.wifi?.gw || '';
+  document.getElementById('w_mask').value = cfg.wifi?.mask || '';
+  document.getElementById('w_dns').value = cfg.wifi?.dns || '';
+  document.getElementById('d_name').value = cfg.device?.name || '';
+  document.getElementById('d_hostname').value = cfg.device?.hostname || '';
+  document.getElementById('io_debounce').value = cfg.io?.buttonDebounceMs ?? 10;
+  document.getElementById('io_axis').value = cfg.io?.axisThreshold ?? 1;
+  document.getElementById('io_detent').value = cfg.io?.encoderDetent ?? 4;
+  document.getElementById('t_tcp').checked = !!cfg.transport?.tcp;
+  document.getElementById('t_port').value = cfg.transport?.tcpPort ?? 4001;
+}
+
+Promise.all([api('/api/config'), api('/api/pins/available')]).then(([c, p]) => {
+  cfg = c.data;
+  pinInfo = p.data;
+  modules = JSON.parse(JSON.stringify(cfg.modules || []));
+  fill();
+  renderModules();
+});
+
+// ------------------- редактор модулей -------------------
+
+const RESERVED_NAMES = { 0:'BOOT/strap', 19:'USB D-', 20:'USB D+', 43:'UART0', 44:'UART0', 45:'strap', 46:'strap' };
+function reservedName(p) {
+  if (p >= 26 && p <= 37) return 'flash/PSRAM';
+  return RESERVED_NAMES[p] || 'резерв';
+}
+function isReserved(p) { return pinInfo && pinInfo.reserved.includes(p); }
+
+// занятые пины текущего редактора: { pin: "модуль" }
+function usedPins(exceptIdx, exceptKey) {
+  const used = {};
+  modules.forEach((m, idx) => {
+    Object.entries(m.pins || {}).forEach(([k, p]) => {
+      if (idx === exceptIdx && k === exceptKey) return;
+      (used[p] = used[p] || []).push('№' + (idx + 1) + ' ' + m.type + ' ctl' + k);
+    });
+  });
+  return used;
+}
+
+function pinSelect(idx, m, key, adcOnly) {
+  const sel = document.createElement('select');
+  sel.dataset.pin = '1';
+  sel.onchange = () => { m.pins[key] = +sel.value; renderModules(); };
+  const cur = m.pins[key];
+  const used = usedPins(idx, key);
+  const maxPin = pinInfo ? pinInfo.maxPin : 48;
+  let has = false;
+  for (let p = 0; p <= maxPin; p++) {
+    const o = document.createElement('option');
+    o.value = p;
+    if (isReserved(p)) {
+      o.textContent = 'GPIO' + p + ' — ' + reservedName(p);
+      o.disabled = true;
+    } else if (adcOnly && !(pinInfo && pinInfo.adc.includes(p))) {
+      o.textContent = 'GPIO' + p;
+      o.disabled = true;
+    } else if (used[p]) {
+      o.textContent = 'GPIO' + p + ' — занято (' + used[p].join(', ') + ')';
+      o.disabled = true;
+    } else {
+      o.textContent = 'GPIO' + p + (pinInfo && pinInfo.adc.includes(p) ? ' (ADC)' : '');
+    }
+    if (cur === p) { o.selected = true; has = true; }
+    sel.appendChild(o);
+  }
+  if (!has) {
+    const o = document.createElement('option');
+    o.textContent = cur === undefined ? '— выбрать пин —' : 'GPIO' + cur + ' (сейчас)';
+    o.value = cur === undefined ? '' : cur;
+    if (cur === undefined) { o.disabled = true; o.selected = true; }
+    sel.insertBefore(o, sel.firstChild);
+  }
+  return sel;
+}
+
+function ioSpan(idx, m, key) {
+  const s = document.createElement('span');
+  s.className = 'iostate';
+  s.dataset.m = idx;
+  s.dataset.ctl = key;
+  s.dataset.type = m.type;
+  return s;
+}
+
+function numInput(val, onchange, opts) {
+  const i = document.createElement('input');
+  i.type = 'number'; i.value = val;
+  if (opts) { if (opts.min !== undefined) i.min = opts.min; if (opts.max !== undefined) i.max = opts.max; }
+  i.onchange = () => onchange(+i.value);
+  return i;
+}
+
+function chk(val, onchange) {
+  const c = document.createElement('input');
+  c.type = 'checkbox'; c.checked = !!val;
+  c.onchange = () => onchange(c.checked);
+  return c;
+}
+
+function renderModules() {
+  const root = document.getElementById('modList');
+  root.innerHTML = '';
+  modules.forEach((m, idx) => root.appendChild(modCard(m, idx)));
+  updateIoStates();
+  syncJsonView();
+}
+
+function modCard(m, idx) {
+  const card = document.createElement('div');
+  card.className = 'mod';
+
+  // --- шапка: тип, id, кнопки ---
+  const hdr = document.createElement('div');
+  hdr.className = 'modhdr';
+  const type = document.createElement('select');
+  TYPES.forEach(t => { const o = document.createElement('option'); o.textContent = t; type.appendChild(o); });
+  type.value = m.type;
+  type.onchange = () => { m.type = type.value; m.pins = {}; renderModules(); };
+  hdr.appendChild(type);
+  const id = numInput(m.id, v => m.id = v, { min: 0, max: 255 });
+  id.title = 'ModuleId в профиле FlexRouter';
+  hdr.appendChild(id);
+  const dup = document.createElement('button');
+  dup.textContent = '⧉'; dup.title = 'Дублировать модуль';
+  dup.onclick = () => { modules.splice(idx + 1, 0, JSON.parse(JSON.stringify(m))); renderModules(); };
+  hdr.appendChild(dup);
+  const del = document.createElement('button');
+  del.textContent = '✕'; del.className = 'danger'; del.title = 'Удалить модуль';
+  del.onclick = () => { modules.splice(idx, 1); renderModules(); };
+  hdr.appendChild(del);
+  card.appendChild(hdr);
+
+  // --- параметры типа ---
+  const params = document.createElement('div');
+  params.className = 'modparams';
+  function addParam(label, el) {
+    const l = document.createElement('span'); l.className = 'label'; l.textContent = label;
+    const w = document.createElement('span'); w.className = 'param'; w.appendChild(el);
+    params.appendChild(l); params.appendChild(w);
+  }
+  if (m.type === 'Button' || m.type === 'BinaryInput')
+    addParam('activeLow (норма: для кнопки на GND)', chk(m.activeLow !== false, v => m.activeLow = v));
+  if (m.type === 'LinearOutput') {
+    addParam('activeLow', chk(!!m.activeLow, v => m.activeLow = v));
+    addParam('rgb (WS2812)', chk(!!m.rgb, v => m.rgb = v));
+  }
+  if (m.type === 'ShiftIn' || m.type === 'ShiftOut') {
+    addParam('chips (1..4)', numInput(m.chips || 1, v => { m.chips = v; renderModules(); }, { min: 1, max: 4 }));
+    if (m.type === 'ShiftOut')
+      addParam('activeLow', chk(!!m.activeLow, v => m.activeLow = v));
+  }
+  if (m.type === 'Indicator') {
+    const d = document.createElement('select');
+    ['none', 'max7219'].forEach(t => { const o = document.createElement('option'); o.textContent = t; d.appendChild(o); });
+    d.value = m.driver || 'none';
+    d.onchange = () => { m.driver = d.value; renderModules(); };
+    addParam('driver', d);
+    if ((m.driver || 'none') === 'max7219') {
+      addParam('cs', numInput(m.cs ?? 10, v => m.cs = v));
+      addParam('sck', numInput(m.sck ?? 12, v => m.sck = v));
+      addParam('mosi', numInput(m.mosi ?? 11, v => m.mosi = v));
+      addParam('intensity (0..15)', numInput(m.intensity ?? 4, v => m.intensity = v, { min: 0, max: 15 }));
+    }
+  }
+  card.appendChild(params);
+
+  // --- пины ---
+  if (m.type === 'Indicator')
+    return card;
+
+  // ShiftIn/ShiftOut: шина (data/clk/latch) + карта «controlId → бит каскада»
+  if (m.type === 'ShiftIn' || m.type === 'ShiftOut') {
+    const isOut = m.type === 'ShiftOut';
+    const bus = document.createElement('table');
+    bus.innerHTML = '<tr><th>шина 74HC' + (isOut ? '595' : '165') + '</th><th>GPIO</th><th>состояние</th><th></th></tr>';
+    [['data', isOut ? 'в данные (DS)' : 'данные (QH)'],
+     ['clk', 'такт (SHCP/CP)'],
+     ['latch', isOut ? 'строб (STCP)' : 'защёлка (PL)']].forEach(([key, title]) => {
+      const tr = document.createElement('tr');
+      const c1 = document.createElement('td'); c1.textContent = key + ' — ' + title;
+      const c2 = document.createElement('td');
+      c2.appendChild(pinSelect(idx, m, key, false));
+      const c3 = document.createElement('td');
+      const c4 = document.createElement('td');
+      tr.append(c1, c2, c3, c4);
+      bus.appendChild(tr);
+    });
+    card.appendChild(bus);
+
+    const map = (m.map = m.map || {});
+    const t = document.createElement('table');
+    t.innerHTML = '<tr><th>controlId</th><th>бит каскада (0..' + ((m.chips || 1) * 8 - 1) + ')</th><th>состояние</th><th></th></tr>';
+    Object.keys(map).sort((a, b) => a - b).forEach(key => {
+      const tr = document.createElement('tr');
+      const c1 = document.createElement('td'); c1.className = 'mono'; c1.textContent = key;
+      const c2 = document.createElement('td');
+      c2.appendChild(numInput(map[key], v => map[key] = v, { min: 0, max: (m.chips || 1) * 8 - 1 }));
+      const c3 = document.createElement('td');
+      const s = document.createElement('span');
+      s.className = 'iostate';
+      s.dataset.m = idx; s.dataset.ctl = key; s.dataset.type = isOut ? 'LinearOutput' : 'Button';
+      c3.appendChild(s);
+      const c4 = document.createElement('td');
+      const db = document.createElement('button');
+      db.textContent = '✕';
+      db.onclick = () => { delete map[key]; renderModules(); };
+      c4.appendChild(db);
+      tr.append(c1, c2, c3, c4);
+      t.appendChild(tr);
+    });
+    card.appendChild(t);
+
+    const addRow = document.createElement('div');
+    addRow.className = 'row';
+    const addBtn = document.createElement('button');
+    addBtn.textContent = '+ канал';
+    addBtn.onclick = () => {
+      let n = 1;
+      while (map[n] !== undefined) n++;
+      let b = 0;
+      const usedBits = Object.values(map);
+      while (usedBits.includes(b)) b++;
+      map[n] = b;
+      renderModules();
+    };
+    addRow.appendChild(addBtn);
+    card.appendChild(addRow);
+    return card;
+  }
+
+  const table = document.createElement('table');
+  table.innerHTML = '<tr><th>controlId</th><th>GPIO</th><th>состояние</th><th></th></tr>';
+  const keys = Object.keys(m.pins || {}).sort((a, b) =>
+    (parseInt(a) - parseInt(b)) || (a < b ? -1 : 1));
+  keys.forEach(key => {
+    const tr = document.createElement('tr');
+    const adcOnly = m.type === 'Axis';
+    const ctl = document.createElement('td'); ctl.className = 'mono'; ctl.textContent = key;
+    const pin = document.createElement('td');
+    pin.appendChild(pinSelect(idx, m, key, adcOnly));
+    const state = document.createElement('td');
+    state.appendChild(ioSpan(idx, m, key));
+    const del = document.createElement('td');
+    const db = document.createElement('button');
+    db.textContent = '✕'; db.title = 'Удалить controlId ' + key;
+    db.onclick = () => { delete m.pins[key]; if (m.cal) delete m.cal[key]; renderModules(); };
+    del.appendChild(db);
+    tr.append(ctl, pin, state, del);
+    table.appendChild(tr);
+
+    // калибровка оси
+    if (m.type === 'Axis') {
+      const trc = document.createElement('tr');
+      trc.className = 'calrow';
+      const cal = (m.cal = m.cal || {});
+      cal[key] = cal[key] || { min: 0, max: 4095 };
+      const c1 = document.createElement('td'); c1.textContent = 'калибровка';
+      const c2 = document.createElement('td');
+      c2.className = 'row';
+      const mn = numInput(cal[key].min, v => cal[key].min = v);
+      const mx = numInput(cal[key].max, v => cal[key].max = v);
+      c2.append('min', mn, 'max', mx);
+      const c3 = document.createElement('td');
+      c3.className = 'row';
+      ['min', 'max'].forEach(which => {
+        const b = document.createElement('button');
+        b.textContent = '⟳ ' + which;
+        b.title = 'Считать текущий analogRead в ' + which;
+        b.onclick = async () => {
+          const p = m.pins[key];
+          const r = await api('/api/adc/read?pin=' + p);
+          if (r.ok) { cal[key][which] = r.data.raw; renderModules(); }
+          else toast('Ошибка чтения ADC: ' + (r.data?.error || r.status));
+        };
+        c3.appendChild(b);
+      });
+      trc.append(c1, c2, c3);
+      table.appendChild(trc);
+    }
+  });
+  card.appendChild(table);
+
+  // --- добавить controlId ---
+  const addRow = document.createElement('div');
+  addRow.className = 'row';
+  const addBtn = document.createElement('button');
+  if (m.type === 'Encoder') {
+    addBtn.textContent = '+ энкодер';
+    addBtn.onclick = () => {
+      let n = 1;
+      while (m.pins[n + 'a'] || m.pins[n + 'b']) n++;
+      m.pins[n + 'a'] = freePin(idx); m.pins[n + 'b'] = freePin(idx, m.pins[n + 'a']);
+      renderModules();
+    };
+  } else {
+    addBtn.textContent = '+ controlId';
+    addBtn.onclick = () => {
+      let n = 1;
+      while (m.pins[n] !== undefined) n++;
+      m.pins[n] = freePin(idx, null, m.type === 'Axis');
+      renderModules();
+    };
+  }
+  addRow.appendChild(addBtn);
+  card.appendChild(addRow);
+  return card;
+}
+
+// первый свободный допустимый пин (для авто-добавления controlId)
+function freePin(idx, exclude, adcOnly) {
+  const used = usedPins(idx, null);
+  const maxPin = pinInfo ? pinInfo.maxPin : 48;
+  for (let p = 0; p <= maxPin; p++) {
+    if (isReserved(p)) continue;
+    if (adcOnly && !(pinInfo && pinInfo.adc.includes(p))) continue;
+    if (used[p] || p === exclude) continue;
+    return p;
+  }
+  return 0;
+}
+
+// --- live-состояние пинов (WS io) ---
+function updateIoStates() {
+  document.querySelectorAll('.iostate').forEach(s => {
+    const ctl = s.dataset.ctl, type = s.dataset.type;
+    const io = ioState;
+    let txt = '—', cls = 'iostate';
+    if (!io) { s.textContent = txt; s.className = cls; return; }
+    if (type === 'LinearOutput') {
+      const on = io.lamps && io.lamps[ctl];
+      txt = on ? '● горит' : '○ не горит'; if (on) cls += ' on';
+    } else if (type === 'Button') {
+      const on = io.buttons && io.buttons[ctl];
+      txt = on ? '● нажата' : '○ отпущена'; if (on) cls += ' on';
+    } else if (type === 'BinaryInput') {
+      const bit = io.binaryMask !== undefined && ((io.binaryMask >> (parseInt(ctl) - 1)) & 1);
+      txt = bit ? '● замкнута' : '○ разомкнута'; if (bit) cls += ' on';
+    } else if (type === 'Axis') {
+      const raw = io.axesRaw && io.axesRaw[ctl];
+      const val = io.axes && io.axes[ctl];
+      txt = raw !== undefined ? ('ADC ' + raw + ' → ' + (val ?? '—')) : '—';
+      if (raw !== undefined) cls += ' on';
+    } else if (type === 'Encoder') {
+      txt = 'квадратура';
+    }
+    s.textContent = txt;
+    s.className = cls;
+  });
+}
+
+// --- JSON-вид ---
+function syncJsonView() {
+  const d = document.querySelector('details');
+  if (d && d.open)
+    document.getElementById('modjson').value = JSON.stringify(modules, null, 1);
+}
+document.querySelector('details').addEventListener('toggle', syncJsonView);
+document.getElementById('jsonIn').onclick = syncJsonView;
+document.getElementById('jsonOut').onclick = () => {
+  try {
+    const j = JSON.parse(document.getElementById('modjson').value);
+    if (!Array.isArray(j)) return toast('Ожидался массив модулей');
+    modules = j; renderModules(); toast('Загружено в редактор (не забудьте «Сохранить»)');
+  } catch (e) { toast('Ошибка JSON: ' + e.message); }
+};
+
+// --- добавление модуля ---
+document.getElementById('addMod').onclick = () => {
+  const t = document.getElementById('addType').value;
+  if (!t) return;
+  let id = 1;
+  modules.forEach(m => { if (m.type === t && m.id >= id) id = m.id + 1; });
+  const m = { id: id, type: t, pins: {} };
+  if (t === 'Indicator') m.driver = 'none';
+  modules.push(m);
+  document.getElementById('addType').value = '';
+  renderModules();
+};
+
+// --- сканирование Wi-Fi (для настройки из AP) ---
+document.getElementById('w_scanbtn').onclick = async () => {
+  const sel = document.getElementById('w_scan');
+  const r = await api('/api/wifi/scan');
+  if (!r.ok) return toast('Ошибка сканирования: ' + r.status);
+  if (r.data.busy) {
+    toast('Сканирование, подождите…');
+    setTimeout(() => document.getElementById('w_scanbtn').click(), 2500);
+    return;
+  }
+  sel.innerHTML = '<option value="">— выберите сеть —</option>';
+  r.data.scan
+    .sort((a, b) => b.rssi - a.rssi)
+    .forEach(n => {
+      const o = document.createElement('option');
+      o.value = n.ssid;
+      o.textContent = n.ssid + ' (' + n.rssi + ' dBm' + (n.secure ? ', пароль' : ', открытая') + ')';
+      sel.appendChild(o);
+    });
+};
+document.getElementById('w_scan').onchange = function () {
+  if (this.value) document.getElementById('w_ssid').value = this.value;
+};
+
+document.getElementById('reload').onclick = () => location.reload();
+
+document.getElementById('save').onclick = async () => {
+  cfg.wifi = { ssid: v('w_ssid'), pass: v('w_pass'), ip: v('w_ip'), gw: v('w_gw'), mask: v('w_mask'), dns: v('w_dns') };
+  cfg.device = { name: v('d_name'), hostname: v('d_hostname') };
+  cfg.modules = modules;
+  cfg.io = { buttonDebounceMs: +v('io_debounce'), axisThreshold: +v('io_axis'), encoderDetent: +v('io_detent') };
+  cfg.transport = { tcp: document.getElementById('t_tcp').checked, tcpPort: +v('t_port') };
+  const r = await postJSON('/api/config', cfg);
+  if (r.ok && r.data.ok) toast(r.data.reboot ? 'Сохранено, плата перезагружается…' : 'Сохранено, Wi-Fi переподключается…');
+  else toast('Ошибка сохранения: ' + (r.data?.error || r.status));
+};
+
+function v(id) { return document.getElementById(id).value.trim(); }
+</script>
+</body>
+</html>
